@@ -1,0 +1,317 @@
+---
+title: "`r params$report_title`"
+output: html_document
+params:
+  report_title: "RBS Program Monitoring Report"
+  connection_string: |
+    Driver=SQL Server;
+      Server=AAP00VA3PPQSQL0\\MSSQLSERVER,1433;
+      Database=PPQ_AQI_ARMDMV2;
+      trusted_connection=yes
+  commodity_country_filters: !r data.frame(
+    commodity = character(),
+    country = character(),
+    stringsAsFactors = FALSE
+  )
+  period_filters: !r data.frame(
+    location_id = character(),
+    implementation_date = as.Date(character()),
+    before_days = integer(),
+    after_days = integer(),
+    stringsAsFactors = FALSE
+  )
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+required_packages <- c("DBI", "knitr")
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+
+if (!requireNamespace("odbc", quietly = TRUE)) {
+  missing_packages <- c(missing_packages, "odbc")
+}
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Install required packages before rendering: ",
+    paste(unique(missing_packages), collapse = ", ")
+  )
+}
+
+normalize_names <- function(x) {
+  tolower(gsub("_+", "_", gsub("[^A-Za-z0-9]+", "_", x)))
+}
+
+prepare_commodity_country_filters <- function(x) {
+  if (!is.data.frame(x)) {
+    stop("`commodity_country_filters` must be a data frame.")
+  }
+
+  names(x) <- normalize_names(names(x))
+  required_columns <- c("commodity", "country")
+
+  if (!all(required_columns %in% names(x))) {
+    stop("`commodity_country_filters` must include `commodity` and `country` columns.")
+  }
+
+  out <- x[required_columns]
+  out$commodity <- trimws(as.character(out$commodity))
+  out$country <- trimws(as.character(out$country))
+  out <- out[nzchar(out$commodity) & nzchar(out$country), , drop = FALSE]
+
+  if (nrow(out) == 0) {
+    stop("`commodity_country_filters` must include at least one non-empty commodity/country combination.")
+  }
+
+  out$commodity_key <- tolower(out$commodity)
+  out$country_key <- tolower(out$country)
+
+  unique(out)
+}
+
+prepare_period_filters <- function(x) {
+  if (!is.data.frame(x)) {
+    stop("`period_filters` must be a data frame.")
+  }
+
+  names(x) <- normalize_names(names(x))
+
+  if ("location" %in% names(x) && !"location_id" %in% names(x)) {
+    names(x)[names(x) == "location"] <- "location_id"
+  }
+
+  required_columns <- c("location_id", "implementation_date", "before_days", "after_days")
+
+  if (!all(required_columns %in% names(x))) {
+    stop(
+      "`period_filters` must include `location_id`, `implementation_date`, ",
+      "`before_days`, and `after_days` columns."
+    )
+  }
+
+  out <- x[required_columns]
+  out$location_id <- trimws(as.character(out$location_id))
+  out$location_id[normalize_names(out$location_id) == "all"] <- "all"
+  out$implementation_date <- as.Date(out$implementation_date)
+  out$before_days <- as.integer(out$before_days)
+  out$after_days <- as.integer(out$after_days)
+
+  if (any(!nzchar(out$location_id))) {
+    stop("`period_filters$location_id` cannot be blank.")
+  }
+
+  invalid_location <- !(out$location_id == "all" | grepl("^[0-9]+$", out$location_id))
+  if (any(invalid_location)) {
+    stop("`period_filters$location_id` must be a numeric LOCATION_ID or `all`.")
+  }
+
+  if (any(is.na(out$implementation_date))) {
+    stop("`period_filters$implementation_date` must be coercible to Date.")
+  }
+
+  if (any(is.na(out$before_days) | out$before_days < 1L)) {
+    stop("`period_filters$before_days` must contain positive integers.")
+  }
+
+  if (any(is.na(out$after_days) | out$after_days < 1L)) {
+    stop("`period_filters$after_days` must contain positive integers.")
+  }
+
+  out$before_start <- out$implementation_date - out$before_days
+  out$before_end <- out$implementation_date - 1
+  out$after_start <- out$implementation_date
+  out$after_end <- out$implementation_date + out$after_days - 1
+
+  out
+}
+
+sql_quote_date <- function(x) {
+  paste0("'", format(as.Date(x), "%Y-%m-%d"), "'")
+}
+
+commodity_country_filters <- prepare_commodity_country_filters(params$commodity_country_filters)
+period_filters <- prepare_period_filters(params$period_filters)
+```
+
+## Requested filters
+
+```{r filter-summary}
+knitr::kable(
+  commodity_country_filters[c("commodity", "country")],
+  caption = "Commodity and origin country combinations supplied to the report"
+)
+
+knitr::kable(
+  setNames(
+    period_filters[c(
+      "location_id",
+      "implementation_date",
+      "before_start",
+      "before_end",
+      "after_start",
+      "after_end"
+    )],
+    c(
+      "LOCATION_ID",
+      "Implementation Date",
+      "Before Start",
+      "Before End",
+      "After Start",
+      "After End"
+    )
+  ),
+  caption = "Location and evaluation windows supplied to the report"
+)
+```
+
+## Data pull
+
+```{r query-and-shape}
+date_start <- min(period_filters$before_start)
+date_end <- max(period_filters$after_end)
+
+specific_locations <- unique(period_filters$location_id[period_filters$location_id != "all"])
+location_clause <- ""
+
+if (length(specific_locations) > 0 && !any(period_filters$location_id == "all")) {
+  location_clause <- paste0(
+    " AND LOCATION_ID IN (",
+    paste(specific_locations, collapse = ", "),
+    ")"
+  )
+}
+
+query <- paste0(
+  "SELECT REPORT_DT, LOCATION, LOCATION_ID, SITE, ORIGIN_NM, PATHWAY, ",
+  "QUANTITY, UNIT_NM, FY, COMMODITY ",
+  "FROM [PPQ_AQI_ARMDMV2].[AQASMSG].[F280_MV] ",
+  "WHERE REPORT_DT >= ", sql_quote_date(date_start),
+  " AND REPORT_DT < DATEADD(day, 1, ", sql_quote_date(date_end), ")",
+  location_clause
+)
+
+db_conn <- DBI::dbConnect(
+  odbc::odbc(),
+  .connection_string = params$connection_string
+)
+on.exit(DBI::dbDisconnect(db_conn), add = TRUE)
+
+raw_data <- DBI::dbGetQuery(db_conn, query)
+
+if (nrow(raw_data) == 0) {
+  report_data <- data.frame(
+    "Report Date" = as.Date(character()),
+    Location = character(),
+    "Location Site Name" = character(),
+    Origin = character(),
+    Pathway = character(),
+    Quantity = numeric(),
+    "Units of Measure" = character(),
+    RBS_Year = integer(),
+    Action = character(),
+    stringsAsFactors = FALSE
+  )
+} else {
+  raw_data$report_date <- as.Date(raw_data$REPORT_DT)
+  raw_data$location_id_key <- trimws(as.character(raw_data$LOCATION_ID))
+  raw_data$commodity_key <- tolower(trimws(as.character(raw_data$COMMODITY)))
+  raw_data$country_key <- tolower(trimws(as.character(raw_data$ORIGIN_NM)))
+
+  filtered_data <- merge(
+    raw_data,
+    commodity_country_filters[c("commodity_key", "country_key")],
+    by = c("commodity_key", "country_key")
+  )
+
+  build_period_pull <- function(period_row, data) {
+    location_matches <- if (period_row[["location_id"]] == "all") {
+      rep(TRUE, nrow(data))
+    } else {
+      data$location_id_key == period_row[["location_id"]]
+    }
+
+    before_rows <- data[
+      location_matches &
+        data$report_date >= period_row[["before_start"]] &
+        data$report_date <= period_row[["before_end"]],
+      ,
+      drop = FALSE
+    ]
+    after_rows <- data[
+      location_matches &
+        data$report_date >= period_row[["after_start"]] &
+        data$report_date <= period_row[["after_end"]],
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(before_rows) > 0) {
+      before_rows$Action <- "before"
+    }
+
+    if (nrow(after_rows) > 0) {
+      after_rows$Action <- "after"
+    }
+
+    rbind(before_rows, after_rows)
+  }
+
+  period_matches <- lapply(
+    seq_len(nrow(period_filters)),
+    function(i) build_period_pull(period_filters[i, , drop = FALSE], filtered_data)
+  )
+  period_matches <- period_matches[vapply(period_matches, nrow, integer(1)) > 0]
+
+  if (length(period_matches) == 0) {
+    report_data <- data.frame(
+      "Report Date" = as.Date(character()),
+      Location = character(),
+      "Location Site Name" = character(),
+      Origin = character(),
+      Pathway = character(),
+      Quantity = numeric(),
+      "Units of Measure" = character(),
+      RBS_Year = integer(),
+      Action = character(),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    report_data <- unique(do.call(rbind, period_matches))
+    report_data <- report_data[c(
+      "REPORT_DT",
+      "LOCATION",
+      "SITE",
+      "ORIGIN_NM",
+      "PATHWAY",
+      "QUANTITY",
+      "UNIT_NM",
+      "FY",
+      "Action"
+    )]
+
+    names(report_data) <- c(
+      "Report Date",
+      "Location",
+      "Location Site Name",
+      "Origin",
+      "Pathway",
+      "Quantity",
+      "Units of Measure",
+      "RBS_Year",
+      "Action"
+    )
+
+    report_data[["Report Date"]] <- as.Date(report_data[["Report Date"]])
+    rownames(report_data) <- NULL
+  }
+}
+```
+
+```{r results}
+cat("Rows returned:", nrow(report_data))
+```
+
+```{r results-table}
+knitr::kable(report_data, caption = "F280_MV monitoring pull")
+```

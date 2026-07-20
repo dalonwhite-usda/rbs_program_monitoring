@@ -3,24 +3,23 @@ RBS program monitoring. Supporting data pulls for original RBS approach. Build f
 
 ## F280 monitoring report
 
-Render `/home/runner/work/rbs_program_monitoring/rbs_program_monitoring/f280_program_monitoring_report.Rmd` as HTML with:
+Set the input filters in `/home/runner/work/rbs_program_monitoring/rbs_program_monitoring/params.csv`:
+
+```csv
+param_type,commodity,country,location_id,implementation_date,before_days,after_days
+commodity_country,grapes,chile,,,,
+commodity_country,rambutan,ecuador,,,,
+period,,,101,2024-07-01,365,365
+period,,,all,2025-01-01,365,365
+```
+
+Then render `/home/runner/work/rbs_program_monitoring/rbs_program_monitoring/f280_program_monitoring_report.Rmd` as HTML with:
 
 ```r
 rmarkdown::render(
   "/home/runner/work/rbs_program_monitoring/rbs_program_monitoring/f280_program_monitoring_report.Rmd",
   params = list(
-    commodity_country_filters = data.frame(
-      commodity = c("grapes", "rambutan"),
-      country = c("chile", "ecuador"),
-      stringsAsFactors = FALSE
-    ),
-    period_filters = data.frame(
-      location_id = c("101", "all"),
-      implementation_date = as.Date(c("2024-07-01", "2025-01-01")),
-      before_days = c(365, 365),
-      after_days = c(365, 365),
-      stringsAsFactors = FALSE
-    )
+    params_csv = "/home/runner/work/rbs_program_monitoring/rbs_program_monitoring/params.csv"
   ),
   output_file = "/absolute/path/to/f280_program_monitoring_report.html"
 )
@@ -28,7 +27,8 @@ rmarkdown::render(
 
 The report:
 - connects with the provided ODBC SQL Server connection string
-- filters by commodity/country combinations using `COMMODITY` and `ORIGIN_NM`
-- filters by before/after date windows relative to each `implementation_date`
-- accepts numeric `LOCATION_ID` values or `all` in `period_filters$location_id`
+- reads commodity/country and period inputs from `params.csv`
+- uses `param_type = commodity_country` rows for `COMMODITY` and `ORIGIN_NM` filters
+- uses `param_type = period` rows for before/after date windows relative to each `implementation_date`
+- accepts numeric `LOCATION_ID` values or `all` in `params.csv`
 - returns the requested columns in an HTML report table

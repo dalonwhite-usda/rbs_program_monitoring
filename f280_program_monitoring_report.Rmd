@@ -8,18 +8,7 @@ params:
       Server=AAP00VA3PPQSQL0\\MSSQLSERVER,1433;
       Database=PPQ_AQI_ARMDMV2;
       trusted_connection=yes
-  commodity_country_filters: !r data.frame(
-    commodity = character(),
-    country = character(),
-    stringsAsFactors = FALSE
-  )
-  period_filters: !r data.frame(
-    location_id = character(),
-    implementation_date = as.Date(character()),
-    before_days = integer(),
-    after_days = integer(),
-    stringsAsFactors = FALSE
-  )
+  params_csv: "params.csv"
 ---
 
 ```{r setup, include=FALSE}
@@ -41,6 +30,42 @@ if (length(missing_packages) > 0) {
 
 normalize_names <- function(x) {
   tolower(gsub("_+", "_", gsub("[^A-Za-z0-9]+", "_", x)))
+}
+
+read_params_csv <- function(path) {
+  if (!is.character(path) || length(path) != 1L || !nzchar(path)) {
+    stop("`params_csv` must be a single file path.")
+  }
+
+  if (!file.exists(path)) {
+    stop("`params_csv` does not exist: ", path)
+  }
+
+  out <- utils::read.csv(path, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+  names(out) <- normalize_names(names(out))
+
+  if (!"param_type" %in% names(out)) {
+    stop("`params_csv` must include a `param_type` column.")
+  }
+
+  out$param_type <- normalize_names(out$param_type)
+
+  commodity_country_filters <- out[
+    out$param_type == "commodity_country",
+    intersect(c("commodity", "country"), names(out)),
+    drop = FALSE
+  ]
+
+  period_filters <- out[
+    out$param_type == "period",
+    intersect(c("location_id", "implementation_date", "before_days", "after_days"), names(out)),
+    drop = FALSE
+  ]
+
+  list(
+    commodity_country_filters = commodity_country_filters,
+    period_filters = period_filters
+  )
 }
 
 prepare_commodity_country_filters <- function(x) {
@@ -130,13 +155,16 @@ sql_quote_date <- function(x) {
   paste0("'", format(as.Date(x), "%Y-%m-%d"), "'")
 }
 
-commodity_country_filters <- prepare_commodity_country_filters(params$commodity_country_filters)
-period_filters <- prepare_period_filters(params$period_filters)
+csv_params <- read_params_csv(params$params_csv)
+commodity_country_filters <- prepare_commodity_country_filters(csv_params$commodity_country_filters)
+period_filters <- prepare_period_filters(csv_params$period_filters)
 ```
 
 ## Requested filters
 
 ```{r filter-summary}
+cat("Parameters file:", params$params_csv)
+
 knitr::kable(
   commodity_country_filters[c("commodity", "country")],
   caption = "Commodity and origin country combinations supplied to the report"

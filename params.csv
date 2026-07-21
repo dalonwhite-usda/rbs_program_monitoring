@@ -1,5 +1,4 @@
 param_type,commodity,country,location_id,implementation_date,before_days,after_days
-commodity_country,grapes,chile,,,,
-commodity_country,rambutan,ecuador,,,,
-period,,,101,2024-07-01,365,365
-period,,,all,2025-01-01,365,365
+commodity_country,GRAPE,chile,,,,
+period,,,881,2024-12-18,365,365
+period,,,all,2025-12-17,365,365

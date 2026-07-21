@@ -11,10 +11,23 @@ params:
   params_csv: "params.csv"
 ---
 
+
+```{r set-params}
+if(!exists("params")) {
+  params <- list(
+    report_title = "RBS Program Monitoring Report",
+    connection_string = "Driver=SQL Server;Server=AAP00VA3PPQSQL0\\MSSQLSERVER,1433;Database=PPQ_AQI_ARMDMV2;trusted_connection=yes",
+    params_csv = "params.csv"
+  )
+}
+```
+
+
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
-required_packages <- c("DBI", "knitr")
+required_packages <- c("DBI", "knitr", "openxlsx")
 missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 
 if (!requireNamespace("odbc", quietly = TRUE)) {
@@ -200,23 +213,58 @@ date_start <- min(period_filters$before_start)
 date_end <- max(period_filters$after_end)
 
 specific_locations <- unique(period_filters$location_id[period_filters$location_id != "all"])
-location_clause <- ""
+build_period_query_clause <- function(period_row, locations_to_exclude) {
+  location_condition <- if (period_row[["location_id"]] == "all") {
+    if (length(locations_to_exclude) > 0) {
+      paste0(
+        "LTRIM(RTRIM(CAST(LOCATION_ID AS varchar(50)))) NOT IN (",
+        paste(sprintf("'%s'", locations_to_exclude), collapse = ", "),
+        ") AND "
+      )
+    } else {
+      ""
+    }
+  } else {
+    paste0(
+      "LTRIM(RTRIM(CAST(LOCATION_ID AS varchar(50)))) = '",
+      period_row[["location_id"]],
+      "' AND "
+    )
+  }
 
-if (length(specific_locations) > 0 && !any(period_filters$location_id == "all")) {
-  location_clause <- paste0(
-    " AND LOCATION_ID IN (",
-    paste(specific_locations, collapse = ", "),
+  paste0(
+    "(",
+    location_condition,
+    "REPORT_DT >= ", sql_quote_date(period_row[["before_start"]]),
+    " AND REPORT_DT < DATEADD(day, 1, ", sql_quote_date(period_row[["after_end"]]), ")",
     ")"
   )
 }
 
+period_query_clauses <- vapply(
+  seq_len(nrow(period_filters)),
+  function(i) build_period_query_clause(period_filters[i, , drop = FALSE], specific_locations),
+  character(1)
+)
+
 query <- paste0(
-  "SELECT REPORT_DT, LOCATION, LOCATION_ID, SITE, ORIGIN_NM, PATHWAY, ",
-  "QUANTITY, UNIT_NM, FY, COMMODITY ",
-  "FROM [PPQ_AQI_ARMDMV2].[AQASMSG].[F280_MV] ",
-  "WHERE REPORT_DT >= ", sql_quote_date(date_start),
-  " AND REPORT_DT < DATEADD(day, 1, ", sql_quote_date(date_end), ")",
-  location_clause
+  "SELECT  F280_ID,
+      COMMODITY,
+      CTYPE_NM,
+      DISP_CD,
+      DISP_NM,
+      CREATE_DT,
+      REPORT_DT,
+      LOCATION,
+      LOCATION_ID,
+      SITE,
+      ORIGIN_NM,
+      PATHWAY,
+      QUANTITY,
+      UNIT_NM,
+      FY
+  FROM [PPQ_AQI_ARMDMV2].[AQASMSG].[F280_MV] ",
+  "WHERE ", paste(period_query_clauses, collapse = " OR ")
 )
 
 db_conn <- DBI::dbConnect(
@@ -229,8 +277,12 @@ raw_data <- DBI::dbGetQuery(db_conn, query)
 
 if (nrow(raw_data) == 0) {
   report_data <- data.frame(
+    "PPQ280 Record ID" = character(),
+    Commodity = character(),
+    "Create Date" = as.Date(character()),
     "Report Date" = as.Date(character()),
     Location = character(),
+    "Location ID" = character(),
     "Location Site Name" = character(),
     Origin = character(),
     Pathway = character(),
@@ -254,7 +306,7 @@ if (nrow(raw_data) == 0) {
 
   build_period_pull <- function(period_row, data) {
     location_matches <- if (period_row[["location_id"]] == "all") {
-      rep(TRUE, nrow(data))
+      !data$location_id_key %in% specific_locations
     } else {
       data$location_id_key == period_row[["location_id"]]
     }
@@ -295,6 +347,7 @@ if (nrow(raw_data) == 0) {
     report_data <- data.frame(
       "Report Date" = as.Date(character()),
       Location = character(),
+      "Location ID" = character(),
       "Location Site Name" = character(),
       Origin = character(),
       Pathway = character(),
@@ -307,26 +360,38 @@ if (nrow(raw_data) == 0) {
   } else {
     report_data <- unique(do.call(rbind, period_matches))
     report_data <- report_data[c(
+      "F280_ID",
+      "COMMODITY",
+      "CTYPE_NM",
+      "DISP_CD",
+      "DISP_NM",
+      "CREATE_DT",
       "REPORT_DT",
       "LOCATION",
+      "LOCATION_ID",
       "SITE",
       "ORIGIN_NM",
       "PATHWAY",
       "QUANTITY",
       "UNIT_NM",
-      "FY",
       "Action"
     )]
 
     names(report_data) <- c(
+      "PPQ280 Record ID",
+      "Commodity",
+      "Commodity Type Name",
+      "Disposition Code",
+      "Disposition",
+      "Create Date",
       "Report Date",
       "Location",
+      "Location ID",
       "Location Site Name",
       "Origin",
       "Pathway",
       "Quantity",
       "Units of Measure",
-      "RBS_Year",
       "Action"
     )
 
@@ -343,3 +408,65 @@ cat("Rows returned:", nrow(report_data))
 ```{r results-table}
 knitr::kable(report_data, caption = "F280_MV monitoring pull")
 ```
+
+```{r write-csv}
+report_metadata <- rbind(
+  data.frame(
+    section = "report_parameter",
+    variable = c("report_title", "params_csv", "connection_string", "date_start", "date_end", "query"),
+    value = c(
+      params$report_title,
+      params$params_csv,
+      params$connection_string,
+      format(date_start),
+      format(date_end),
+      query
+    ),
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    section = "commodity_country_filter",
+    variable = paste0("row_", seq_len(nrow(commodity_country_filters))),
+    value = paste0(
+      "commodity=", commodity_country_filters$commodity,
+      "; country=", commodity_country_filters$country
+    ),
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    section = "period_filter",
+    variable = paste0("row_", seq_len(nrow(period_filters))),
+    value = paste0(
+      "location_id=", period_filters$location_id,
+      "; implementation_date=", format(period_filters$implementation_date),
+      "; before_days=", period_filters$before_days,
+      "; after_days=", period_filters$after_days,
+      "; before_start=", format(period_filters$before_start),
+      "; before_end=", format(period_filters$before_end),
+      "; after_start=", format(period_filters$after_start),
+      "; after_end=", format(period_filters$after_end)
+    ),
+    stringsAsFactors = FALSE
+  )
+)
+
+date_summary <- report_data |>
+  dplyr::group_by(`Location ID`, Location, Action) |>
+  dplyr::summarise(
+    min_report_date = min(`Report Date`, na.rm = TRUE),
+    max_report_date = max(`Report Date`, na.rm = TRUE),
+    n = dplyr::n(),
+    .groups = "drop"
+  )
+
+openxlsx::write.xlsx(
+  list(
+    "Report Data" = report_data,
+    Metadata = report_metadata,
+    "Report Date Summary" = date_summary
+  ),
+  paste0(Sys.Date(), "_f280_program_monitoring_report.xlsx"),
+  rowNames = FALSE
+)
+```
+

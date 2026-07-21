@@ -27,7 +27,7 @@ if(!exists("params")) {
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
-required_packages <- c("DBI", "knitr", "openxlsx")
+required_packages <- c("DBI", "dplyr", "knitr", "openxlsx")
 missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 
 if (!requireNamespace("odbc", quietly = TRUE)) {
@@ -168,6 +168,28 @@ sql_quote_date <- function(x) {
   paste0("'", format(as.Date(x), "%Y-%m-%d"), "'")
 }
 
+empty_report_data <- function() {
+  data.frame(
+    "PPQ280 Record ID" = character(),
+    Commodity = character(),
+    "Commodity Type Name" = character(),
+    "Disposition Code" = character(),
+    Disposition = character(),
+    "Create Date" = as.Date(character()),
+    "Report Date" = as.Date(character()),
+    Location = character(),
+    "Location ID" = character(),
+    "Location Site Name" = character(),
+    Origin = character(),
+    Pathway = character(),
+    Quantity = numeric(),
+    "Units of Measure" = character(),
+    "Test Period" = character(),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+}
+
 csv_params <- read_params_csv(params$params_csv)
 commodity_country_filters <- prepare_commodity_country_filters(csv_params$commodity_country_filters)
 period_filters <- prepare_period_filters(csv_params$period_filters)
@@ -261,8 +283,7 @@ query <- paste0(
       ORIGIN_NM,
       PATHWAY,
       QUANTITY,
-      UNIT_NM,
-      FY
+      UNIT_NM
   FROM [PPQ_AQI_ARMDMV2].[AQASMSG].[F280_MV] ",
   "WHERE ", paste(period_query_clauses, collapse = " OR ")
 )
@@ -276,22 +297,7 @@ on.exit(DBI::dbDisconnect(db_conn), add = TRUE)
 raw_data <- DBI::dbGetQuery(db_conn, query)
 
 if (nrow(raw_data) == 0) {
-  report_data <- data.frame(
-    "PPQ280 Record ID" = character(),
-    Commodity = character(),
-    "Create Date" = as.Date(character()),
-    "Report Date" = as.Date(character()),
-    Location = character(),
-    "Location ID" = character(),
-    "Location Site Name" = character(),
-    Origin = character(),
-    Pathway = character(),
-    Quantity = numeric(),
-    "Units of Measure" = character(),
-    RBS_Year = integer(),
-    Action = character(),
-    stringsAsFactors = FALSE
-  )
+  report_data <- empty_report_data()
 } else {
   raw_data$report_date <- as.Date(raw_data$REPORT_DT)
   raw_data$location_id_key <- trimws(as.character(raw_data$LOCATION_ID))
@@ -327,11 +333,11 @@ if (nrow(raw_data) == 0) {
     ]
 
     if (nrow(before_rows) > 0) {
-      before_rows$Action <- "before"
+      before_rows$test_period <- "before"
     }
 
     if (nrow(after_rows) > 0) {
-      after_rows$Action <- "after"
+      after_rows$test_period <- "after"
     }
 
     rbind(before_rows, after_rows)
@@ -344,19 +350,7 @@ if (nrow(raw_data) == 0) {
   period_matches <- period_matches[vapply(period_matches, nrow, integer(1)) > 0]
 
   if (length(period_matches) == 0) {
-    report_data <- data.frame(
-      "Report Date" = as.Date(character()),
-      Location = character(),
-      "Location ID" = character(),
-      "Location Site Name" = character(),
-      Origin = character(),
-      Pathway = character(),
-      Quantity = numeric(),
-      "Units of Measure" = character(),
-      RBS_Year = integer(),
-      Action = character(),
-      stringsAsFactors = FALSE
-    )
+    report_data <- empty_report_data()
   } else {
     report_data <- unique(do.call(rbind, period_matches))
     report_data <- report_data[c(
@@ -374,7 +368,7 @@ if (nrow(raw_data) == 0) {
       "PATHWAY",
       "QUANTITY",
       "UNIT_NM",
-      "Action"
+      "test_period"
     )]
 
     names(report_data) <- c(
@@ -392,9 +386,10 @@ if (nrow(raw_data) == 0) {
       "Pathway",
       "Quantity",
       "Units of Measure",
-      "Action"
+      "Test Period"
     )
 
+    report_data[["Create Date"]] <- as.Date(report_data[["Create Date"]])
     report_data[["Report Date"]] <- as.Date(report_data[["Report Date"]])
     rownames(report_data) <- NULL
   }
@@ -451,7 +446,7 @@ report_metadata <- rbind(
 )
 
 date_summary <- report_data |>
-  dplyr::group_by(`Location ID`, Location, Action) |>
+  dplyr::group_by(`Location ID`, Location, `Test Period`) |>
   dplyr::summarise(
     min_report_date = min(`Report Date`, na.rm = TRUE),
     max_report_date = max(`Report Date`, na.rm = TRUE),

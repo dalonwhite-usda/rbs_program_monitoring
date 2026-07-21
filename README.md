@@ -21,7 +21,7 @@ The default connection string is defined in `f280_program_monitoring_report.Rmd`
 
 ## How the Report Works
 
-The report reads `params.csv`, builds a date and location query against `F280_MV`, then applies the commodity/country filters in R. It returns matching F280 records with location, origin, pathway, quantity, disposition, and an `Action` value of `before` or `after`.
+The report reads `params.csv`, builds a date and location query against `F280_MV`, then applies the commodity/country filters in R. It returns matching F280 records with location, origin, pathway, quantity, disposition, and a `Test Period` value of `before` or `after`.
 
 The report creates:
 
@@ -150,7 +150,7 @@ The report output includes:
 - `Pathway`
 - `Quantity`
 - `Units of Measure`
-- `Action`
+- `Test Period`
 
 ## Troubleshooting
 
